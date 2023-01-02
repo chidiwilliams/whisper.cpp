@@ -37,6 +37,11 @@ jobs:
                 make
                 make stream
 
+            - name: Test
+              run: |
+                bash models/download-ggml-model.sh tiny
+                ./main -m models/ggml-tiny.bin -f samples/jfk.wav
+
     ubuntu-latest-gcc:
         runs-on: ubuntu-latest
 
