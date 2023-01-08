@@ -58,8 +58,11 @@ endif
 #       feel free to update the Makefile for your architecture and send a pull request or issue
 ifeq ($(UNAME_M),$(filter $(UNAME_M),x86_64 i686))
 	ifeq ($(UNAME_S),Darwin)
-		CFLAGS += -mfma -mf16c
+		CFLAGS += -mf16c
 		AVX1_M := $(shell sysctl machdep.cpu.features)
+		ifneq (,$(findstring FMA,$(AVX1_M)))
+			CFLAGS += -mfma
+		endif
 		ifneq (,$(findstring AVX1.0,$(AVX1_M)))
 			CFLAGS += -mavx
 		endif
@@ -83,6 +86,10 @@ ifeq ($(UNAME_M),$(filter $(UNAME_M),x86_64 i686))
 		F16C_M := $(shell grep "f16c " /proc/cpuinfo)
 		ifneq (,$(findstring f16c,$(F16C_M)))
 			CFLAGS += -mf16c
+		endif
+		SSE3_M := $(shell grep "sse3 " /proc/cpuinfo)
+		ifneq (,$(findstring sse3,$(SSE3_M)))
+			CFLAGS += -msse3
 		endif
 	else ifeq ($(UNAME_S),Haiku)
 		AVX1_M := $(shell sysinfo -cpu | grep "AVX ")
@@ -155,8 +162,8 @@ $(info I UNAME_M:  $(UNAME_M))
 $(info I CFLAGS:   $(CFLAGS))
 $(info I CXXFLAGS: $(CXXFLAGS))
 $(info I LDFLAGS:  $(LDFLAGS))
-$(info I CC:       $(CC) $(CCV))
-$(info I CXX:      $(CXX) $(CXXV))
+$(info I CC:       $(CCV))
+$(info I CXX:      $(CXXV))
 $(info )
 
 default: main

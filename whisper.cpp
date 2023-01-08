@@ -412,6 +412,8 @@ struct whisper_context {
     std::vector<uint8_t>   buf_compute;
     std::vector<uint8_t>   buf_compute_layer;
 
+    ggml_type wtype; // weight type (FP32 or FP16)
+
     whisper_model model;
     whisper_vocab vocab;
 
@@ -435,9 +437,8 @@ struct whisper_context {
 };
 
 template<typename T>
-static void read_safe(std::ifstream& fin, T& dest)
-{
-  fin.read((char*)& dest, sizeof(T));
+static void read_safe(whisper_model_loader * loader, T & dest) {
+    loader->read(loader->context, &dest, sizeof(T));
 }
 
 // load the model from a ggml file
@@ -451,24 +452,18 @@ static void read_safe(std::ifstream& fin, T& dest)
 //
 // see the convert-pt-to-ggml.py script for details
 //
-static bool whisper_model_load(const std::string & fname, whisper_context & wctx) {
-    fprintf(stderr, "%s: loading model from '%s'\n", __func__, fname.c_str());
+static bool whisper_model_load(struct whisper_model_loader * loader, whisper_context & wctx) {
+    fprintf(stderr, "%s: loading model\n", __func__);
 
     auto & model = wctx.model;
     auto & vocab = wctx.vocab;
 
-    auto fin = std::ifstream(fname, std::ios::binary);
-    if (!fin) {
-        fprintf(stderr, "%s: failed to open '%s'\n", __func__, fname.c_str());
-        return false;
-    }
-
     // verify magic
     {
         uint32_t magic;
-        read_safe(fin, magic);
+        read_safe(loader, magic);
         if (magic != 0x67676d6c) {
-            fprintf(stderr, "%s: invalid model file '%s' (bad magic)\n", __func__, fname.c_str());
+            fprintf(stderr, "%s: invalid model data (bad magic)\n", __func__);
             return false;
         }
     }
@@ -477,17 +472,17 @@ static bool whisper_model_load(const std::string & fname, whisper_context & wctx
     {
         auto & hparams = model.hparams;
 
-        read_safe(fin, hparams.n_vocab);
-        read_safe(fin, hparams.n_audio_ctx);
-        read_safe(fin, hparams.n_audio_state);
-        read_safe(fin, hparams.n_audio_head);
-        read_safe(fin, hparams.n_audio_layer);
-        read_safe(fin, hparams.n_text_ctx);
-        read_safe(fin, hparams.n_text_state);
-        read_safe(fin, hparams.n_text_head);
-        read_safe(fin, hparams.n_text_layer);
-        read_safe(fin, hparams.n_mels);
-        read_safe(fin, hparams.f16);
+        read_safe(loader, hparams.n_vocab);
+        read_safe(loader, hparams.n_audio_ctx);
+        read_safe(loader, hparams.n_audio_state);
+        read_safe(loader, hparams.n_audio_head);
+        read_safe(loader, hparams.n_audio_layer);
+        read_safe(loader, hparams.n_text_ctx);
+        read_safe(loader, hparams.n_text_state);
+        read_safe(loader, hparams.n_text_head);
+        read_safe(loader, hparams.n_text_layer);
+        read_safe(loader, hparams.n_mels);
+        read_safe(loader, hparams.f16);
 
         assert(hparams.n_text_state == hparams.n_audio_state);
 
@@ -535,17 +530,17 @@ static bool whisper_model_load(const std::string & fname, whisper_context & wctx
     {
         auto & filters = wctx.model.filters;
 
-        read_safe(fin, filters.n_mel);
-        read_safe(fin, filters.n_fft);
+        read_safe(loader, filters.n_mel);
+        read_safe(loader, filters.n_fft);
 
         filters.data.resize(filters.n_mel * filters.n_fft);
-        fin.read((char *) filters.data.data(), filters.data.size() * sizeof(float));
+        loader->read(loader->context, filters.data.data(), filters.data.size() * sizeof(float));
     }
 
     // load vocab
     {
         int32_t n_vocab = 0;
-        read_safe(fin, n_vocab);
+        read_safe(loader, n_vocab);
 
         //if (n_vocab != model.hparams.n_vocab) {
         //    fprintf(stderr, "%s: invalid model file '%s' (bad vocab size %d != %d)\n",
@@ -560,11 +555,11 @@ static bool whisper_model_load(const std::string & fname, whisper_context & wctx
 
         for (int i = 0; i < n_vocab; i++) {
             uint32_t len;
-            read_safe(fin, len);
+            read_safe(loader, len);
 
             if (len > 0) {
                 tmp.resize(len);
-                fin.read(&tmp[0], tmp.size()); // read to buffer
+                loader->read(loader->context, &tmp[0], tmp.size()); // read to buffer
                 word.assign(&tmp[0], tmp.size());
             } else {
                 // seems like we have an empty-string token in multi-language models (i = 50256)
@@ -630,7 +625,9 @@ static bool whisper_model_load(const std::string & fname, whisper_context & wctx
 
     // for the big tensors, we have the option to store the data in 16-bit floats
     // in order to save memory and also to speed up the computation
-    const ggml_type wtype = model.hparams.f16 ? GGML_TYPE_F16 : GGML_TYPE_F32;
+    wctx.wtype = model.hparams.f16 ? GGML_TYPE_F16 : GGML_TYPE_F32;
+
+    const ggml_type wtype = wctx.wtype;
 
     size_t ctx_size = 0;
 
@@ -651,7 +648,6 @@ static bool whisper_model_load(const std::string & fname, whisper_context & wctx
 
         // encoder
         {
-            // TODO: F16 .. maybe not?
             ctx_size += n_audio_ctx*n_audio_state*ggml_type_size(GGML_TYPE_F32); // e_pe;
 
             ctx_size += 3*n_mels*n_audio_state*ggml_type_size(wtype);         // e_conv_1_w
@@ -666,7 +662,6 @@ static bool whisper_model_load(const std::string & fname, whisper_context & wctx
 
         // decoder
         {
-            // TODO: F16 .. maybe not?
             ctx_size += n_text_ctx*n_text_state*ggml_type_size(GGML_TYPE_F32); // d_pe;
 
             ctx_size += n_vocab*n_text_state*ggml_type_size(wtype); // d_te;
@@ -983,8 +978,8 @@ static bool whisper_model_load(const std::string & fname, whisper_context & wctx
             const int n_mem      = n_text_layer*n_text_ctx;
             const int n_elements = n_text_state*n_mem;
 
-            model.memory_k = ggml_new_tensor_1d(ctx, GGML_TYPE_F16, n_elements);
-            model.memory_v = ggml_new_tensor_1d(ctx, GGML_TYPE_F16, n_elements);
+            model.memory_k = ggml_new_tensor_1d(ctx, wtype, n_elements);
+            model.memory_v = ggml_new_tensor_1d(ctx, wtype, n_elements);
         }
 
         // key/value memory for the cross-attention layer
@@ -994,8 +989,8 @@ static bool whisper_model_load(const std::string & fname, whisper_context & wctx
             const int n_mem      = n_text_layer*n_audio_ctx;
             const int n_elements = n_text_state*n_mem;
 
-            model.memory_cross_k = ggml_new_tensor_1d(ctx, GGML_TYPE_F16, n_elements);
-            model.memory_cross_v = ggml_new_tensor_1d(ctx, GGML_TYPE_F16, n_elements);
+            model.memory_cross_k = ggml_new_tensor_1d(ctx, wtype, n_elements);
+            model.memory_cross_v = ggml_new_tensor_1d(ctx, wtype, n_elements);
         }
 
         const size_t memory_size =
@@ -1016,24 +1011,24 @@ static bool whisper_model_load(const std::string & fname, whisper_context & wctx
             int32_t length;
             int32_t ftype;
 
-            read_safe(fin, n_dims);
-            read_safe(fin, length);
-            read_safe(fin, ftype);
+            read_safe(loader, n_dims);
+            read_safe(loader, length);
+            read_safe(loader, ftype);
 
-            if (fin.eof()) {
+            if (loader->eof(loader->context)) {
                 break;
             }
 
             int32_t nelements = 1;
             int32_t ne[3] = { 1, 1, 1 };
             for (int i = 0; i < n_dims; ++i) {
-                read_safe(fin, ne[i]);
+                read_safe(loader, ne[i]);
                 nelements *= ne[i];
             }
 
             std::string name;
             std::vector<char> tmp(length); // create a buffer
-            fin.read(&tmp[0], tmp.size()); // read to buffer
+            loader->read(loader->context, &tmp[0], tmp.size()); // read to buffer
             name.assign(&tmp[0], tmp.size());
 
             if (model.tensors.find(name) == model.tensors.end()) {
@@ -1061,7 +1056,7 @@ static bool whisper_model_load(const std::string & fname, whisper_context & wctx
                 return false;
             }
 
-            fin.read(reinterpret_cast<char *>(tensor->data), ggml_nbytes(tensor));
+            loader->read(loader->context, tensor->data, ggml_nbytes(tensor));
 
             //printf("%48s - [%5d, %5d, %5d], type = %6s, %6.2f MB\n", name.data(), ne[0], ne[1], ne[2], ftype == 0 ? "float" : "f16", ggml_nbytes(tensor)/1024.0/1024.0);
             total_size += ggml_nbytes(tensor);
@@ -1077,8 +1072,6 @@ static bool whisper_model_load(const std::string & fname, whisper_context & wctx
             return false;
         }
     }
-
-    fin.close();
 
     return true;
 }
@@ -1241,14 +1234,14 @@ static bool whisper_encode(
                 ggml_permute(ctxL,
                         ggml_cpy(ctxL,
                             Qcur,
-                            ggml_new_tensor_3d(ctxL, GGML_TYPE_F16, n_state/n_head, n_head, n_ctx)),
+                            ggml_new_tensor_3d(ctxL, wctx.wtype, n_state/n_head, n_head, n_ctx)),
                         0, 2, 1, 3);
 
             struct ggml_tensor * K =
                 ggml_permute(ctxL,
                         ggml_cpy(ctxL,
                             Kcur,
-                            ggml_new_tensor_3d(ctxL, GGML_TYPE_F16, n_state/n_head, n_head, n_ctx)),
+                            ggml_new_tensor_3d(ctxL, wctx.wtype, n_state/n_head, n_head, n_ctx)),
                         0, 2, 1, 3);
 
             struct ggml_tensor * V =
@@ -1258,7 +1251,7 @@ static bool whisper_encode(
                                 Vcur,
                                 n_state/n_head, n_head, n_ctx),
                             1, 2, 0, 3),
-                        ggml_new_tensor_3d(ctxL, GGML_TYPE_F16, n_ctx, n_state/n_head, n_head)
+                        ggml_new_tensor_3d(ctxL, wctx.wtype, n_ctx, n_state/n_head, n_head)
                         );
 
             struct ggml_tensor * KQV = ggml_flash_attn(ctxL, Q, K, V, false);
@@ -1274,7 +1267,7 @@ static bool whisper_encode(
                 ggml_permute(ctxL,
                         ggml_cpy(ctxL,
                             Kcur,
-                            ggml_new_tensor_3d(ctxL, GGML_TYPE_F16, n_state/n_head, n_head, n_ctx)),
+                            ggml_new_tensor_3d(ctxL, wctx.wtype, n_state/n_head, n_head, n_ctx)),
                         0, 2, 1, 3);
 
             // K * Q
@@ -1292,7 +1285,7 @@ static bool whisper_encode(
             //    ggml_permute(ctxL,
             //            ggml_cpy(ctxL,
             //                Vcur,
-            //                ggml_new_tensor_3d(ctxL, GGML_TYPE_F16, n_state/n_head, n_head, n_ctx)),
+            //                ggml_new_tensor_3d(ctxL, wctx.wtype, n_state/n_head, n_head, n_ctx)),
             //            1, 2, 0, 3);
 
             //struct ggml_tensor * KQV = ggml_mul_mat(ctxL, V_trans, KQ_soft_max);
@@ -1304,7 +1297,7 @@ static bool whisper_encode(
                                 Vcur,
                                 n_state/n_head, n_head, n_ctx),
                             0, 2, 1, 3),
-                        ggml_new_tensor_3d(ctxL, GGML_TYPE_F16, n_state/n_head, n_ctx, n_head)
+                        ggml_new_tensor_3d(ctxL, wctx.wtype, n_state/n_head, n_ctx, n_head)
                         );
 
             struct ggml_tensor * KQV = ggml_mul_mat(ctxL, ggml_transpose(ctxL, V), KQ_soft_max);
@@ -1349,7 +1342,7 @@ static bool whisper_encode(
 
 #ifdef USE_FLASH_FF
             cur = ggml_flash_ff(ctxL,
-                    ggml_cpy(ctxL, cur, ggml_new_tensor_2d(ctxL, GGML_TYPE_F16, n_state, N)),
+                    ggml_cpy(ctxL, cur, ggml_new_tensor_2d(ctxL, wctx.wtype, n_state, N)),
                     layer.mlp_0_w, layer.mlp_0_b, layer.mlp_1_w, layer.mlp_1_b);
 #else
             // fully connected
@@ -2239,7 +2232,74 @@ static std::vector<whisper_vocab::id> tokenize(const whisper_vocab & vocab, cons
 // interface implementation
 //
 
-struct whisper_context * whisper_init(const char * path_model) {
+struct whisper_context * whisper_init_from_file(const char * path_model) {
+    whisper_model_loader loader = {};
+
+    fprintf(stderr, "%s: loading model from '%s'\n", __func__, path_model);
+
+    auto fin = std::ifstream(path_model, std::ios::binary);
+    if (!fin) {
+        fprintf(stderr, "%s: failed to open '%s'\n", __func__, path_model);
+        return nullptr;
+    }
+
+    loader.context = &fin;
+    loader.read = [](void * ctx, void * output, size_t read_size) {
+        std::ifstream * fin = (std::ifstream*)ctx;
+        fin->read((char *)output, read_size);
+        return read_size;
+    };
+
+    loader.eof = [](void * ctx) {
+        std::ifstream * fin = (std::ifstream*)ctx;
+        return fin->eof();
+    };
+
+    loader.close = [](void * ctx) {
+        std::ifstream * fin = (std::ifstream*)ctx;
+        fin->close();
+    };
+
+    return whisper_init(&loader);
+}
+
+struct whisper_context * whisper_init_from_buffer(void * buffer, size_t buffer_size) {
+    struct buf_context {
+        uint8_t* buffer;
+        size_t size;
+        size_t current_offset;
+    };
+
+    buf_context ctx = { reinterpret_cast<uint8_t*>(buffer), buffer_size, 0 };
+    whisper_model_loader loader = {};
+
+    fprintf(stderr, "%s: loading model from buffer\n", __func__);
+
+    loader.context = &ctx;
+
+    loader.read = [](void * ctx, void * output, size_t read_size) {
+        buf_context * buf = reinterpret_cast<buf_context *>(ctx);
+
+        size_t size_to_copy = buf->current_offset + read_size < buf->size ? read_size : buf->size - buf->current_offset;
+
+        memcpy(output, buf->buffer + buf->current_offset, size_to_copy);
+        buf->current_offset += size_to_copy;
+
+        return size_to_copy;
+    };
+
+    loader.eof = [](void * ctx) {
+        buf_context * buf = reinterpret_cast<buf_context *>(ctx);
+
+        return buf->current_offset >= buf->size;
+    };
+
+    loader.close = [](void * /*ctx*/) { };
+
+    return whisper_init(&loader);
+}
+
+struct whisper_context * whisper_init(struct whisper_model_loader * loader) {
     ggml_time_init();
 
     whisper_context * ctx = new whisper_context;
@@ -2248,13 +2308,16 @@ struct whisper_context * whisper_init(const char * path_model) {
 
     ctx->t_start_us = t_start_us;
 
-    if (!whisper_model_load(path_model, *ctx)) {
-        fprintf(stderr, "%s: failed to load model from '%s'\n", __func__, path_model);
+    if (!whisper_model_load(loader, *ctx)) {
+        loader->close(loader->context);
+        fprintf(stderr, "%s: failed to load model\n", __func__);
         delete ctx;
         return nullptr;
     }
 
     ctx->t_load_us = ggml_time_us() - t_start_us;
+
+    loader->close(loader->context);
 
     return ctx;
 }
@@ -2473,12 +2536,12 @@ int whisper_lang_auto_detect(
     }
 
     {
-        for (int i = 0; i < (int) probs_id.size(); i++) {
+        for (const auto & prob : probs_id) {
             if (lang_probs) {
-                lang_probs[probs_id[i].second] = probs_id[i].first;
+                lang_probs[prob.second] = prob.first;
             }
 
-            //printf("%s: lang %2d (%3s): %f\n", __func__, probs_id[i].second, whisper_lang_str(probs_id[i].second), probs_id[i].first);
+            //printf("%s: lang %2d (%3s): %f\n", __func__, prob.second, whisper_lang_str(prob.second), prob.first);
         }
     }
 
@@ -2581,6 +2644,8 @@ const char * whisper_print_system_info(void) {
     s += "FP16_VA = "   + std::to_string(ggml_cpu_has_fp16_va())   + " | ";
     s += "WASM_SIMD = " + std::to_string(ggml_cpu_has_wasm_simd()) + " | ";
     s += "BLAS = "      + std::to_string(ggml_cpu_has_blas())      + " | ";
+    s += "SSE3 = "      + std::to_string(ggml_cpu_has_sse3())      + " | ";
+    s += "VSX = "       + std::to_string(ggml_cpu_has_vsx())       + " | ";
 
     return s.c_str();
 }
@@ -3157,7 +3222,7 @@ int whisper_full_parallel(
 
         // separate key + value memory for each processor
         {
-            auto & ctx = model.ctx_mem;
+            auto & mctx = model.ctx_mem;
 
             const auto & hparams = model.hparams;
 
@@ -3170,8 +3235,8 @@ int whisper_full_parallel(
                 const int n_mem      = n_text_layer*n_text_ctx;
                 const int n_elements = n_text_state*n_mem;
 
-                model.memory_k = ggml_new_tensor_1d(ctx, GGML_TYPE_F16, n_elements);
-                model.memory_v = ggml_new_tensor_1d(ctx, GGML_TYPE_F16, n_elements);
+                model.memory_k = ggml_new_tensor_1d(mctx, ctx->wtype, n_elements);
+                model.memory_v = ggml_new_tensor_1d(mctx, ctx->wtype, n_elements);
             }
 
             // key/value memory for the cross-attention layer
@@ -3181,8 +3246,8 @@ int whisper_full_parallel(
                 const int n_mem      = n_text_layer*n_audio_ctx;
                 const int n_elements = n_text_state*n_mem;
 
-                model.memory_cross_k = ggml_new_tensor_1d(ctx, GGML_TYPE_F16, n_elements);
-                model.memory_cross_v = ggml_new_tensor_1d(ctx, GGML_TYPE_F16, n_elements);
+                model.memory_cross_k = ggml_new_tensor_1d(mctx, ctx->wtype, n_elements);
+                model.memory_cross_v = ggml_new_tensor_1d(mctx, ctx->wtype, n_elements);
             }
         }
     }
@@ -3226,17 +3291,17 @@ int whisper_full_parallel(
     for (int i = 0; i < n_processors - 1; ++i) {
         auto & results_i = ctxs[i].result_all;
 
-        for (int j = 0; j < (int) results_i.size(); ++j) {
+        for (auto & result : results_i) {
             // correct the segment timestamp taking into account the offset
-            results_i[j].t0 += 100*((i + 1)*n_samples_per_processor)/WHISPER_SAMPLE_RATE + offset_t;
-            results_i[j].t1 += 100*((i + 1)*n_samples_per_processor)/WHISPER_SAMPLE_RATE + offset_t;
+            result.t0 += 100*((i + 1)*n_samples_per_processor)/WHISPER_SAMPLE_RATE + offset_t;
+            result.t1 += 100*((i + 1)*n_samples_per_processor)/WHISPER_SAMPLE_RATE + offset_t;
 
             // make sure that segments are not overlapping
             if (!ctx->result_all.empty()) {
-                results_i[j].t0 = std::max(results_i[j].t0, ctx->result_all.back().t1);
+                result.t0 = std::max(result.t0, ctx->result_all.back().t1);
             }
 
-            ctx->result_all.push_back(std::move(results_i[j]));
+            ctx->result_all.push_back(std::move(result));
 
             // call the new_segment_callback for each segment
             if (params.new_segment_callback) {
@@ -3323,7 +3388,7 @@ static int timestamp_to_sample(int64_t t, int n_samples) {
 }
 
 static int64_t sample_to_timestamp(int i_sample) {
-    return (100*i_sample)/WHISPER_SAMPLE_RATE;
+    return (100ll*i_sample)/WHISPER_SAMPLE_RATE;
 }
 
 // a cost-function / heuristic that is high for text that takes longer to pronounce
@@ -3331,18 +3396,18 @@ static int64_t sample_to_timestamp(int i_sample) {
 static float voice_length(const std::string & text) {
     float res = 0.0f;
 
-    for (size_t i = 0; i < text.size(); ++i) {
-        if (text[i] == ' ') {
+    for (char c : text) {
+        if (c == ' ') {
             res += 0.01f;
-        } else if (text[i] == ',') {
+        } else if (c == ',') {
             res += 2.00f;
-        } else if (text[i] == '.') {
+        } else if (c == '.') {
             res += 3.00f;
-        } else if (text[i] == '!') {
+        } else if (c == '!') {
             res += 3.00f;
-        } else if (text[i] == '?') {
+        } else if (c == '?') {
             res += 3.00f;
-        } else if (text[i] >= '0' && text[i] <= '9') {
+        } else if (c >= '0' && c <= '9') {
             res += 3.00f;
         } else {
             res += 1.00f;
