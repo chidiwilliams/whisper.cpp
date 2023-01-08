@@ -2,14 +2,15 @@ cmake_minimum_required (VERSION 3.0)
 
 project(whisper.cpp VERSION 1.0.4)
 
-set(CMAKE_EXPORT_COMPILE_COMMANDS "on")
+# Add path to modules
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
+
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib")
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(WHISPER_STANDALONE ON)
-    include(cmake/GitVars.cmake)
-    include(cmake/BuildTypes.cmake)
+    include(GitVars)
+    include(BuildTypes)
 
     # configure project version
     if (EXISTS "${CMAKE_SOURCE_DIR}/bindings/ios/Makefile-tmpl")
@@ -52,6 +53,7 @@ if (APPLE)
     option(WHISPER_NO_ACCELERATE       "whisper: disable Accelerate framework" OFF)
     option(WHISPER_NO_AVX              "whisper: disable AVX" OFF)
     option(WHISPER_NO_AVX2             "whisper: disable AVX2" OFF)
+    option(WHISPER_NO_FMA              "whisper: disable FMA" OFF)
 else()
     option(WHISPER_SUPPORT_OPENBLAS    "whisper: support for OpenBLAS" OFF)
 endif()
@@ -81,9 +83,6 @@ endif()
 #set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=native")
 
 # dependencies
-
-set(CMAKE_C_STANDARD   11)
-set(CMAKE_CXX_STANDARD 11)
 
 find_package(Threads REQUIRED)
 
@@ -131,6 +130,7 @@ if (WHISPER_ALL_WARNINGS)
             -Wcast-qual                     \
             -Wstrict-prototypes             \
             -Wpointer-arith                 \
+            -Wno-unused-function            \
         ")
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} \
             -Wall                           \
@@ -157,6 +157,7 @@ else()
     if (MSVC)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /arch:AVX2")
         set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /arch:AVX2")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /arch:AVX2")
     else()
         if (EMSCRIPTEN)
             set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS}   -pthread")
@@ -168,7 +169,10 @@ else()
             if(NOT WHISPER_NO_AVX2)
                 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mavx2")
             endif()
-            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mfma -mf16c")
+            if(NOT WHISPER_NO_FMA)
+                set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mfma")
+            endif()
+            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mf16c")
         endif()
     endif()
 endif()
@@ -189,6 +193,8 @@ add_library(${TARGET}
     whisper.h
     whisper.cpp
     )
+
+include(DefaultTargetOptions)
 
 target_include_directories(${TARGET} PUBLIC
     .
